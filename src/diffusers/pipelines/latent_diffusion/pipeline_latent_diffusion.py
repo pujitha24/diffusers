@@ -151,8 +151,10 @@ class LDMTextToImagePipeline(DiffusionPipeline):
         else:
             raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
 
-        if height % 8 != 0 or width % 8 != 0:
-            raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
+        if height % self.vae_scale_factor != 0 or width % self.vae_scale_factor != 0:
+            raise ValueError(
+                f"`height` and `width` have to be divisible by {self.vae_scale_factor} but are {height} and {width}."
+            )
 
         # get unconditional embeddings for classifier free guidance
         if guidance_scale != 1.0:
@@ -166,7 +168,12 @@ class LDMTextToImagePipeline(DiffusionPipeline):
         prompt_embeds = self.bert(text_input.input_ids.to(self._execution_device))[0]
 
         # get the initial random noise unless the user supplied it
-        latents_shape = (batch_size, self.unet.config.in_channels, height // 8, width // 8)
+        latents_shape = (
+            batch_size,
+            self.unet.config.in_channels,
+            height // self.vae_scale_factor,
+            width // self.vae_scale_factor,
+        )
         if isinstance(generator, list) and len(generator) != batch_size:
             raise ValueError(
                 f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
@@ -183,6 +190,9 @@ class LDMTextToImagePipeline(DiffusionPipeline):
         latents = latents.to(self._execution_device)
 
         self.scheduler.set_timesteps(num_inference_steps)
+
+        # scale the initial noise by the standard deviation required by the scheduler
+        latents = latents * self.scheduler.init_noise_sigma
 
         # prepare extra kwargs for the scheduler step, since not all schedulers have the same signature
         accepts_eta = "eta" in set(inspect.signature(self.scheduler.step).parameters.keys())
@@ -202,6 +212,8 @@ class LDMTextToImagePipeline(DiffusionPipeline):
                 # to avoid doing two forward passes
                 latents_input = torch.cat([latents] * 2)
                 context = torch.cat([negative_prompt_embeds, prompt_embeds])
+
+            latents_input = self.scheduler.scale_model_input(latents_input, t)
 
             # predict the noise residual
             noise_pred = self.unet(latents_input, t, encoder_hidden_states=context).sample

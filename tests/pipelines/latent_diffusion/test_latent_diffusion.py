@@ -14,13 +14,14 @@
 # limitations under the License.
 
 import gc
+import warnings
 
 import numpy as np
 import pytest
 import torch
 from transformers import CLIPTextConfig, CLIPTextModel, CLIPTokenizer
 
-from diffusers import AutoencoderKL, DDIMScheduler, LDMTextToImagePipeline, UNet2DConditionModel
+from diffusers import AutoencoderKL, DDIMScheduler, LDMTextToImagePipeline, LMSDiscreteScheduler, UNet2DConditionModel
 
 from ...testing_utils import (
     assert_tensors_close,
@@ -57,7 +58,7 @@ class LDMTextToImagePipelineTesterConfig(BasePipelineTesterConfig):
         unet = UNet2DConditionModel(
             block_out_channels=(32, 64),
             layers_per_block=2,
-            sample_size=32,
+            sample_size=8,
             in_channels=4,
             out_channels=4,
             down_block_types=("DownBlock2D", "CrossAttnDownBlock2D"),
@@ -127,6 +128,26 @@ class TestLDMTextToImagePipeline(LDMTextToImagePipelineTesterConfig, PipelineTes
         expected_slice = torch.tensor([0.6511, 0.5873, 0.5183, 0.5046, 0.6663, 0.3908, 0.5729, 0.5979, 0.5058])
         # fmt: on
         assert_tensors_close(image[0, -1, -3:, -3:].flatten(), expected_slice, atol=1e-3)
+
+    def test_lms_scheduler_scales_model_input(self):
+        pipe = self.get_pipeline()
+        pipe.scheduler = LMSDiscreteScheduler.from_config(pipe.scheduler.config)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            pipe(**self.get_dummy_inputs())
+
+        assert not [w for w in caught if "scale_model_input" in str(w.message)]
+
+    def test_height_width_use_vae_scale_factor(self):
+        pipe = self.get_pipeline()
+        assert pipe.vae_scale_factor == 2
+
+        image = pipe(**self.get_dummy_inputs(), height=18, width=18).images
+        assert image.shape == (1, 3, 18, 18)
+
+        with pytest.raises(ValueError, match="divisible by 2"):
+            pipe(**self.get_dummy_inputs(), height=17, width=17)
 
 
 class TestLDMTextToImagePipelineMemory(LDMTextToImagePipelineTesterConfig, MemoryTesterMixin):
